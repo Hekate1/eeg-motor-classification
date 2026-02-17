@@ -1,0 +1,6 @@
+# Optional local overrides (do not commit secrets or huge paths).
+# Copy to `configs/local.yaml` and customize.
+
+public_data:
+  processed_data_dir: /absolute/path/to/processed_data
+

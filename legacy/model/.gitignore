@@ -1,0 +1,10 @@
+src/__pycache__/*
+Archive/*
+models/*
+plots/*
+*.txt
+EEG Motor Movement:Imagery Dataset/*
+.DS_Store
+manual\ screenshots/*
+processed_data/*
+__pycache__/*

@@ -1,0 +1,27 @@
+project:
+  seed: 42
+
+self_data:
+  data_dir: data/self
+  subject: "01"
+  runs: ["01", "02"]
+  epoch:
+    tmin_s: 0.0
+    tmax_s: 2.0
+  bandpass_hz: [8, 30]
+
+public_data:
+  processed_data_dir: data/public/processed_data
+  runs: [3, 7, 11]
+  subjects:
+    train_max_subjects: 90
+
+outputs:
+  root: runs
+  self:
+    models_dir: runs/self/models
+    results_dir: runs/self/results
+  public:
+    models_dir: runs/public/models
+    plots_dir: runs/public/plots
+

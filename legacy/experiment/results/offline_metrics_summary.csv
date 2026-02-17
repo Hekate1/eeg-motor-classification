@@ -1,0 +1,3 @@
+mode,count,mean_val_acc,std_val_acc
+transfer,2,0.6451612903225806,0.009123958466923217
+scratch,1,0.567741935483871,
