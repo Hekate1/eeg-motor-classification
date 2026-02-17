@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Environments
+.venv/
+venv/
+ENV/
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
+
+# Data policy
+# - Self-collected sample data is intentionally committed under data/self/
+# - Public dataset and derived processed epochs are intentionally excluded.
+data/public/
+configs/local.yaml
+
+# Training outputs (regenerate locally)
+**/processed_data/
+**/runs/
+**/wandb/
+
+# Jupyter
+notebooks/.ipynb_checkpoints/
+
