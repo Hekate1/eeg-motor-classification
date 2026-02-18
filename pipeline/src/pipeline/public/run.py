@@ -229,14 +229,15 @@ def train_base_model_multi_subject(run_ids=RUN_IDS, n_subjects=50,
         model_dir = os.path.join(os.getcwd(), 'models')
         os.makedirs(model_dir, exist_ok=True)
         
-        # Use the requested number of subjects in the filename
-        model_path = os.path.join(model_dir, f'{model_name}_{n_subjects}_subjects.pt')
+        # Use the *actual* number of subjects in the filename to avoid
+        # misleading checkpoints when fewer subjects are available locally.
+        model_path = os.path.join(model_dir, f'{model_name}_{n_subjects_actual}_subjects.pt')
         classifier.save_model(model_path, metadata=metadata)
         
         # Also save subjects list to a separate text file for easy reference
-        subjects_path = os.path.join(model_dir, f'{model_name}_{n_subjects}_subjects_list.txt')
+        subjects_path = os.path.join(model_dir, f'{model_name}_{n_subjects_actual}_subjects_list.txt')
         with open(subjects_path, 'w') as f:
-            f.write(f"# Training subjects for model: {model_name}_{n_subjects}_subjects.pt\n")
+            f.write(f"# Training subjects for model: {model_name}_{n_subjects_actual}_subjects.pt\n")
             f.write(f"# Trained on: {metadata['timestamp']}\n")
             f.write(f"# Requested subjects: {n_subjects}\n")
             f.write(f"# Actual subjects used: {n_subjects_actual}\n\n")
@@ -251,7 +252,7 @@ def train_base_model_multi_subject(run_ids=RUN_IDS, n_subjects=50,
             dprint(f"\nWARNING: {n_subjects - n_subjects_actual} subjects were excluded during data loading.")
             dprint(f"Requested: {n_subjects} subjects, Actual: {n_subjects_actual} subjects")
             dprint("This is likely because some subjects had non-standard time dimensions.")
-            dprint(f"The model is still saved using the requested number: {model_name}_{n_subjects}_subjects.pt")
+            dprint(f"The model is saved using the actual number: {model_name}_{n_subjects_actual}_subjects.pt")
     
     return classifier, results, metadata
 

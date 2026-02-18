@@ -136,13 +136,18 @@ The public dataset is intentionally excluded from git (too large). The public tr
 
 You can generate these locally with `scripts/download_public_dataset.py`.
 
+Set the environment variable so the training code can find your processed epochs:
+
+```bash
+export PUBLIC_PROCESSED_DATA_DIR=data/public/processed_data
+```
+
 ### Option A: quick smoke test (small)
 
 Useful to validate your environment and that the preprocessing is working:
 
 ```bash
-python scripts/download_public_dataset.py --subjects 1 2 3 --runs 3 7 11 --n-jobs 8
-export PUBLIC_PROCESSED_DATA_DIR=data/public/processed_data
+python scripts/download_public_dataset.py --subjects 1 2 3 --runs 3 7 11
 ```
 
 ### Option B: full pretrain setup (recommended)
@@ -152,30 +157,19 @@ To match the default pretraining config in `pipeline/src/pipeline/public/run.py`
 This downloads and preprocesses motor-imagery runs (3/7/11) for subjects 1–109:
 
 ```bash
-python scripts/download_public_dataset.py --subjects $(seq 1 109) --runs 3 7 11 --n-jobs 8
-export PUBLIC_PROCESSED_DATA_DIR=data/public/processed_data
-```
-
-Then run pretraining (compute-heavy):
-
-```bash
-eeg-public-train --pretrain
+python scripts/download_public_dataset.py --subjects $(seq 1 109) --runs 3 7 11
 ```
 
 ## Training the “best” model (public pretrain → transfer to your headset data)
 
 This is the intended high-performance workflow:
 
-1) **Preprocess the public dataset** into `data/public/processed_data` (see section above) and set:
+1) **Preprocess** the public dataset into `data/public/processed_data` (Option B above).
 
-```bash
-export PUBLIC_PROCESSED_DATA_DIR=data/public/processed_data
-```
+2) **Pretrain** on many public subjects (compute-heavy). This writes:
+- `models/base_model_<N>_subjects.pt` where \(N\) is the **number of subjects actually loaded**.
 
-2) **Pretrain** on many public subjects (compute-heavy). By default this will write:
-- `models/base_model_90_subjects.pt`
-
-Note: The default `eeg-public-train` configuration splits the 109 available subjects into **90 training subjects** and **10 held-out test subjects**.
+Note: the default `eeg-public-train` configuration *targets* 90 training subjects (and holds out 10 test subjects) from the 109 available. If you only preprocess a few subjects, \(N\) will be smaller and the checkpoint name will reflect that.
 
 ```bash
 eeg-public-train --pretrain
@@ -184,14 +178,14 @@ eeg-public-train --pretrain
 3) **Fine-tune / transfer** to your self-collected runs:
 
 Use either:
-- the model you just trained at `models/base_model_90_subjects.pt`, or
+- the model you just trained at `models/base_model_<N>_subjects.pt`, or
 - the included reference checkpoint at `legacy/model/models/base_model_90_subjects.pt`
 
 ```bash
 eeg-self-train \
   --data-dir data/self \
   --runs 01 02 03 04 05 06 \
-  --base-model-path models/base_model_90_subjects.pt \
+  --base-model-path models/base_model_<N>_subjects.pt \
   --model-name offline_transfer_custom
 ```
 

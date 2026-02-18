@@ -18,6 +18,8 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import time
+import re
 
 
 def _parse_int_list(values: list[str]) -> list[int]:
@@ -30,43 +32,68 @@ def _parse_int_list(values: list[str]) -> list[int]:
     return out
 
 
-def preprocess_subject_run(*, subject: int, run: int, raw_root: Path, out_dir: Path) -> Path:
+_RUN_RE = re.compile(r"R(\d+)\.edf$", re.IGNORECASE)
+
+
+def _infer_run_from_path(path: str) -> int:
+    m = _RUN_RE.search(path)
+    if not m:
+        raise ValueError(f"Could not infer run number from EDF filename: {path}")
+    return int(m.group(1))
+
+
+def preprocess_subject(*, subject: int, runs: list[int], raw_root: Path, out_dir: Path) -> list[Path]:
     import mne
     from mne.datasets import eegbci
 
-    # Download raw EDF(s)
-    edf_paths = eegbci.load_data(subject, runs=[run], path=str(raw_root))
+    t0 = time.perf_counter()
+
+    # Download raw EDF(s) (MNE caches under raw_root/MNE-eegbci-data/...)
+    edf_paths = eegbci.load_data(subject, runs=runs, path=str(raw_root))
     if not edf_paths:
-        raise RuntimeError(f"No EDF paths returned for subject={subject} run={run}")
+        raise RuntimeError(f"No EDF paths returned for subject={subject} runs={runs}")
 
-    raw = mne.io.read_raw_edf(edf_paths[0], preload=True, verbose=False)
-    eegbci.standardize(raw)  # channel naming conventions
-    raw.set_montage("standard_1005", on_missing="ignore")
+    t_download = time.perf_counter() - t0
+    t1 = time.perf_counter()
 
-    # Events: EEGBCI uses Annotations like 'T0', 'T1', 'T2'.
-    events, event_id = mne.events_from_annotations(raw, verbose=False)
-    if "T1" not in event_id or "T2" not in event_id:
-        raise RuntimeError(f"Unexpected annotation set; got keys={sorted(event_id.keys())[:10]} ...")
-
-    # Create epochs with the event labels expected by `data_utils.py`
-    epochs = mne.Epochs(
-        raw,
-        events,
-        event_id={"TASK1T1": event_id["T1"], "TASK1T2": event_id["T2"]},
-        tmin=-1.0,
-        tmax=4.0,
-        baseline=(-1.0, 0.0),
-        picks="eeg",
-        preload=True,
-        verbose=False,
-        on_missing="ignore",
-    )
-
+    written: list[Path] = []
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"sub-{subject:03d}_run-{run}_processed-epo.fif"
-    epochs.save(str(out_path), overwrite=True)
-    return out_path
 
+    for edf_path in edf_paths:
+        run = _infer_run_from_path(edf_path)
+        if run not in runs:
+            continue
+
+        raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+        eegbci.standardize(raw)  # channel naming conventions
+        raw.set_montage("standard_1005", on_missing="ignore")
+
+        # Events: EEGBCI uses Annotations like 'T0', 'T1', 'T2'.
+        events, event_id = mne.events_from_annotations(raw, verbose=False)
+        if "T1" not in event_id or "T2" not in event_id:
+            raise RuntimeError(f"Unexpected annotation set; got keys={sorted(event_id.keys())[:10]} ...")
+
+        # Create epochs with the event labels expected by `data_utils.py`
+        epochs = mne.Epochs(
+            raw,
+            events,
+            event_id={"TASK1T1": event_id["T1"], "TASK1T2": event_id["T2"]},
+            tmin=-1.0,
+            tmax=4.0,
+            baseline=(-1.0, 0.0),
+            picks="eeg",
+            preload=True,
+            verbose=False,
+            on_missing="ignore",
+        )
+
+        out_path = out_dir / f"sub-{subject:03d}_run-{run}_processed-epo.fif"
+        epochs.save(str(out_path), overwrite=True)
+        written.append(out_path)
+
+    t_process = time.perf_counter() - t1
+    print(f"[SUBJ {subject:03d}] downloaded {len(edf_paths)} EDF(s) in {t_download:.1f}s; processed {len(written)} run(s) in {t_process:.1f}s")
+    return written
 
 def main() -> None:
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -95,19 +122,20 @@ def main() -> None:
     subjects = _parse_int_list(args.subjects)
     runs = _parse_int_list(args.runs)
 
-    tasks: list[tuple[int, int]] = [(s, r) for s in subjects for r in runs]
+    tasks: list[int] = list(subjects)
 
-    # Parallelize end-to-end: each job downloads (if needed) and writes epochs.
-    # This is typically faster than serial downloads, especially on multi-core machines.
+    # Parallelize by subject: each worker downloads all requested runs for a
+    # subject in a single MNE call, then preprocesses/saves per run.
     from joblib import Parallel, delayed
 
-    def _one(s: int, r: int) -> str:
-        out_path = preprocess_subject_run(subject=s, run=r, raw_root=args.raw_root, out_dir=args.processed_dir)
-        return str(out_path)
+    def _one(s: int) -> list[str]:
+        written = preprocess_subject(subject=s, runs=runs, raw_root=args.raw_root, out_dir=args.processed_dir)
+        return [str(p) for p in written]
 
-    written = Parallel(n_jobs=int(args.n_jobs), prefer="processes")(delayed(_one)(s, r) for s, r in tasks)
-    for p in written:
-        print(f"[OK] Wrote {p}")
+    written_lists = Parallel(n_jobs=int(args.n_jobs), prefer="processes")(delayed(_one)(s) for s in tasks)
+    for written in written_lists:
+        for p in written:
+            print(f"[OK] Wrote {p}")
 
     print("\nDone.")
     print("To point training scripts at this directory, set:")
