@@ -17,6 +17,23 @@ _csp_transformer_cache = {}
 # Cache for pre-filtered band data in filter-bank CSP
 _fb_filter_data_cache = {}
 
+def _ensure_csp_runtime_compat(csp):
+    """
+    Backward compatibility for CSP objects loaded from older checkpoints.
+
+    Newer MNE versions expect a `dec_type` attribute on CSP/GED estimators.
+    Older pickled objects can miss this field, which raises:
+    AttributeError: 'CSP' object has no attribute 'dec_type'
+    """
+    if not hasattr(csp, "dec_type"):
+        filters = getattr(csp, "filters_", None)
+        # In MNE, multi-class decompositions store filters as 3D:
+        # (n_classes, n_components, n_channels). Binary/single are 2D.
+        if isinstance(filters, np.ndarray) and filters.ndim == 3:
+            csp.dec_type = "multi"
+        else:
+            csp.dec_type = "single"
+
 class CSPTransformer:
     def __init__(self, X, y, per_subject=True, subject_indices=None,
                  n_components=4, filter_bank=False,
@@ -69,12 +86,14 @@ class CSPTransformer:
     def global_transform(self, X, subject_indices=None):
         assert not self.per_subject
         if not self.filter_bank:
+            _ensure_csp_runtime_compat(self.global_csp)
             return self.global_csp.transform(X)
         else:
             n_trials = len(X)
             nb      = len(self.global_csps)
             out     = np.zeros((n_trials, nb*self.n_components))
             for i, csp in enumerate(self.global_csps):
+                _ensure_csp_runtime_compat(csp)
                 Xb = filter_data(X, self.sfreq,
                                  self.bands[i][0], self.bands[i][1],
                                  verbose=False, n_jobs=-1)
@@ -91,6 +110,7 @@ class CSPTransformer:
         for sid, csp in self.subject_csps.items():
             idx = np.where(subject_indices == sid)[0]
             if idx.size:
+                _ensure_csp_runtime_compat(csp)
                 out[idx] = csp.transform(X[idx])
 
         return out
@@ -118,6 +138,8 @@ class CSPTransformer:
             if not idx.size:
                 continue
             # Stack CSP outputs per band for this subject
+            for csp in csps:
+                _ensure_csp_runtime_compat(csp)
             feats = [csp.transform(X_bands[i][idx]) for i, csp in enumerate(csps)]
             out[idx] = np.hstack(feats)
         return out
