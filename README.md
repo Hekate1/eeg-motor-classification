@@ -66,6 +66,12 @@ Replay a recorded run and drive the PsychoPy bar UI without a headset connected:
 eeg-headset-frontend --demo-fif data/self/sub-01_run-01_online_raw.fif
 ```
 
+The demo replays in **real time** by default. To speed up or slow down:
+
+```bash
+eeg-headset-frontend --demo-fif data/self/sub-01_run-01_online_raw.fif --demo-speed 2.0
+```
+
 ### 1b) Record your own data (hardware)
 
 This repo’s “frontend” is a PsychoPy + BrainFlow app designed for **OpenBCI Cyton + Daisy** (16 channels) recordings.
