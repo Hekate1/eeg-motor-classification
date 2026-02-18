@@ -134,8 +134,8 @@ def main() -> None:
     parser.add_argument(
         "--n-jobs",
         type=int,
-        default=max(1, min(8, (os.cpu_count() or 2))),
-        help="Parallel workers (downloads + preprocessing).",
+        default=None,
+        help="Max parallel workers (defaults to CPU core count).",
     )
     parser.add_argument(
         "--raw-root",
@@ -161,6 +161,9 @@ def main() -> None:
 
     tasks: list[int] = list(subjects)
 
+    cpu_count = int(os.cpu_count() or 1)
+    n_jobs = cpu_count if args.n_jobs is None else max(1, min(int(args.n_jobs), cpu_count))
+
     # Parallelize by subject: each worker downloads all requested runs for a
     # subject in a single MNE call, then preprocesses/saves per run.
     from joblib import Parallel, delayed
@@ -175,7 +178,7 @@ def main() -> None:
         )
         return [str(p) for p in written]
 
-    written_lists = Parallel(n_jobs=int(args.n_jobs), prefer="processes")(delayed(_one)(s) for s in tasks)
+    written_lists = Parallel(n_jobs=n_jobs, prefer="processes")(delayed(_one)(s) for s in tasks)
     for written in written_lists:
         for p in written:
             print(f"[OK] Wrote {p}")
