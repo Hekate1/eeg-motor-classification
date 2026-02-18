@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 
@@ -72,6 +73,12 @@ def main() -> None:
     parser.add_argument("--subjects", nargs="+", default=["1"], help="Subject IDs to download (e.g. 1 2 3)")
     parser.add_argument("--runs", nargs="+", default=["3", "7", "11"], help="Run IDs (e.g. 3 7 11)")
     parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=max(1, min(8, (os.cpu_count() or 2))),
+        help="Parallel workers (downloads + preprocessing).",
+    )
+    parser.add_argument(
         "--raw-root",
         type=Path,
         default=Path("data/public/raw"),
@@ -88,15 +95,19 @@ def main() -> None:
     subjects = _parse_int_list(args.subjects)
     runs = _parse_int_list(args.runs)
 
-    for subj in subjects:
-        for run in runs:
-            out_path = preprocess_subject_run(
-                subject=subj,
-                run=run,
-                raw_root=args.raw_root,
-                out_dir=args.processed_dir,
-            )
-            print(f"[OK] Wrote {out_path}")
+    tasks: list[tuple[int, int]] = [(s, r) for s in subjects for r in runs]
+
+    # Parallelize end-to-end: each job downloads (if needed) and writes epochs.
+    # This is typically faster than serial downloads, especially on multi-core machines.
+    from joblib import Parallel, delayed
+
+    def _one(s: int, r: int) -> str:
+        out_path = preprocess_subject_run(subject=s, run=r, raw_root=args.raw_root, out_dir=args.processed_dir)
+        return str(out_path)
+
+    written = Parallel(n_jobs=int(args.n_jobs), prefer="processes")(delayed(_one)(s, r) for s, r in tasks)
+    for p in written:
+        print(f"[OK] Wrote {p}")
 
     print("\nDone.")
     print("To point training scripts at this directory, set:")

@@ -7,7 +7,7 @@ This component contains the offline processing + model training code for:
 ## Self-data quick baseline
 
 ```bash
-eeg-self-train --data-dir data/self --runs 01 02 --simple-model rf
+eeg-self-train --data-dir data/self --runs 01 02 03 04 05 06 --simple-model rf
 ```
 
 ## Classical baselines (self data)

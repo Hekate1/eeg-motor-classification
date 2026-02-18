@@ -49,12 +49,9 @@ import mne
 import numpy as np
 from brainflow.board_shim import BoardIds, BoardShim, BrainFlowInputParams
 from mne.decoding import CSP
-from psychopy import core, event, visual
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 
-from .gamified_feedback import GameScene
-from .bar_feedback import BarFeedback
 from .online_preprocessing import preprocess_epoch_data
 
 ###############################################################################
@@ -94,6 +91,12 @@ def epoch_data(raw: mne.io.Raw, events, sfreq):
 
 
 def main():
+    # Import PsychoPy only when running the UI (avoids requiring a display just
+    # to import constants like EPOCH_TMIN/EPOCH_TMAX in headless contexts).
+    from psychopy import core, event, visual
+    from .gamified_feedback import GameScene
+    from .bar_feedback import BarFeedback
+
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--subject", required=True)
     parser.add_argument("--run", type=int, required=True)

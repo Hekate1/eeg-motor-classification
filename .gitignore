@@ -25,8 +25,17 @@ configs/local.yaml
 
 # Training outputs (regenerate locally)
 **/processed_data/
-**/runs/
 **/wandb/
+
+# Default: ignore generated runs...
+runs/
+# ...but keep the portfolio artifacts used by the notebook/report.
+!runs/
+!runs/self/
+!runs/self/results/
+!runs/self/results/**
+!runs/self/models/
+!runs/self/models/**
 
 # Jupyter
 notebooks/.ipynb_checkpoints/

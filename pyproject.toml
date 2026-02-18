@@ -10,6 +10,44 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 
+[project.optional-dependencies]
+base = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "matplotlib",
+  "seaborn",
+  "mne",
+  "scikit-learn",
+  "tqdm",
+  "joblib",
+  "pyyaml",
+]
+frontend = [
+  "brainflow",
+  "psychopy",
+]
+ml = [
+  "torch",
+  "pyriemann",
+]
+all = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "matplotlib",
+  "seaborn",
+  "mne",
+  "scikit-learn",
+  "tqdm",
+  "joblib",
+  "pyyaml",
+  "brainflow",
+  "psychopy",
+  "torch",
+  "pyriemann",
+]
+
 [project.scripts]
 eeg-headset-frontend = "headset_frontend.run:main"
 eeg-public-train = "pipeline.public.train:main"

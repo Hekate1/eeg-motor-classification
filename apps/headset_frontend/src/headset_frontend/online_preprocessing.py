@@ -3,13 +3,25 @@ import mne
 import numpy as np
 
 
-def preprocess_epoch_data(raw, events, tmin, tmax, notch_freq=60, l_freq=1.0, h_freq=50.0, z_threshold=2.0):
+def preprocess_epoch_data(
+    raw,
+    events,
+    tmin,
+    tmax,
+    notch_freq=60,
+    l_freq=1.0,
+    h_freq=50.0,
+    z_threshold=2.0,
+    filter_method: str = "iir",
+):
     """Extract and preprocess a single epoch from raw data for classification."""
     # Copy raw to avoid modifying the original data
     raw_copy = raw.copy()
     # Pre-filter and re-reference raw data
-    raw_copy.notch_filter(freqs=notch_freq, picks="eeg", verbose=False)
-    raw_copy.filter(l_freq=l_freq, h_freq=h_freq, picks="eeg", verbose=False)
+    #
+    # Use IIR by default to avoid FIR filter-length warnings/distortion on short recordings.
+    raw_copy.notch_filter(freqs=notch_freq, picks="eeg", method=filter_method, verbose=False)
+    raw_copy.filter(l_freq=l_freq, h_freq=h_freq, picks="eeg", method=filter_method, verbose=False)
     # Re-reference to average of all EEG channels
     raw_copy.set_eeg_reference('average', verbose=False)
     # Create Epochs for the specified events and time window

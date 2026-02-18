@@ -1,0 +1,2 @@
+timestamp,mode,base_model,subjects,trials,val_accuracy,notes
+2026-02-18T18:42:57.734498,simple_rf,,1,579,0.5,"csp_components=6;runs=['01', '02', '03', '04', '05', '06'];seed=42;val_split=0.2;split=random_stratified"

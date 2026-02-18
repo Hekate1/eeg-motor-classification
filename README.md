@@ -41,19 +41,29 @@ legacy/                       # snapshot of the original project layout (for ref
 
 This is a Python-only project. Start with a clean Python 3.10+ environment.
 
+**One command (recommended):**
+
 ```bash
-python -m pip install -r requirements/base.txt
-python -m pip install -e .
+python -m pip install -e ".[base]"
 ```
 
-Install the optional dependency sets depending on what you want to run:
+Add optional feature sets depending on what you want to run:
 
 ```bash
 # Headset app (BrainFlow + PsychoPy)
-python -m pip install -r requirements/frontend.txt
+python -m pip install -e ".[base,frontend]"
 
 # Model training + classical baselines
-python -m pip install -r requirements/ml.txt
+python -m pip install -e ".[base,ml]"
+
+# Everything
+python -m pip install -e ".[all]"
+```
+
+**Or use the helper script:**
+
+```bash
+./scripts/install.sh --frontend --ml
 ```
 
 Notes:
@@ -72,7 +82,7 @@ eeg-headset-frontend --demo-fif data/self/sub-01_run-01_online_raw.fif
 Run a quick CSP + RandomForest baseline on the included self-recorded runs:
 
 ```bash
-eeg-self-train --data-dir data/self --runs 01 02 --simple-model rf --model-name quick_rf
+eeg-self-train --data-dir data/self --runs 01 02 03 04 05 06 --simple-model rf --model-name quick_rf
 ```
 
 Outputs are written under `runs/self/` by default.

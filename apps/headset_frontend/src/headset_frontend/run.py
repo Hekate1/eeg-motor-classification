@@ -28,6 +28,7 @@ def _run_demo_fif(
     n_cal: int = 40,
     n_csp_components: int = 6,
     seconds_per_epoch: float = 0.6,
+    cue_seconds: float = 0.35,
 ) -> None:
     import mne
     import numpy as np
@@ -78,6 +79,8 @@ def _run_demo_fif(
         height=18,
         color="black",
     )
+    cue = visual.TextStim(win, text="", pos=(0, 120), height=60, color="black")
+    cue_sm = visual.TextStim(win, text="", pos=(0, 170), height=22, color="black")
 
     for i in range(n_cal, len(y)):
         if "escape" in event.getKeys():
@@ -92,12 +95,27 @@ def _run_demo_fif(
         proba = np.clip(proba, 0.0, 1.0)
         proba = proba / (proba.sum() + 1e-12)
 
+        true_label = "Left" if int(y[i]) == 0 else "Right"
+        pred_label = "Left" if float(proba[0]) >= float(proba[1]) else "Right"
+
+        # --- show cue briefly, then show feedback bars ---
+        cue.text = true_label
+        cue_sm.text = f"Pred: {pred_label}"
+
         title.draw()
         hint.draw()
+        cue.draw()
+        cue_sm.draw()
+        win.flip()
+        core.wait(max(0.0, min(cue_seconds, seconds_per_epoch)))
+
+        title.draw()
+        hint.draw()
+        cue_sm.draw()
         bars.update([float(proba[0]), float(proba[1])])
         bars.draw()
         win.flip()
-        core.wait(seconds_per_epoch)
+        core.wait(max(0.0, seconds_per_epoch - cue_seconds))
 
     win.close()
 
@@ -115,6 +133,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--demo-n-cal", type=int, default=40, help="Calibration epochs for the demo CSP+SGD model.")
     parser.add_argument("--demo-seconds-per-epoch", type=float, default=0.6, help="Seconds to display each epoch.")
+    parser.add_argument("--demo-cue-seconds", type=float, default=0.35, help="Seconds to display the cue text per epoch.")
     args, _unknown = parser.parse_known_args(argv)
 
     if args.demo_fif is not None:
@@ -122,6 +141,7 @@ def main(argv: list[str] | None = None) -> None:
             args.demo_fif,
             n_cal=args.demo_n_cal,
             seconds_per_epoch=args.demo_seconds_per_epoch,
+            cue_seconds=args.demo_cue_seconds,
         )
         return
 
