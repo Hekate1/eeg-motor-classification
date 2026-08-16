@@ -137,12 +137,10 @@ def v2_rows(df):
 
 # ---------------------------------------------------------------- figure 1: LORO
 #
-# Leave-one-run-out = the k=7 arm of the leak-free v2 sweep: checkpoint selection
-# uses an inner validation split carved from the training runs, the held-out run
-# is evaluated exactly once, and deep fits average over 3 seeds. The original
-# December leave_one_run_out rows are NOT used: they were inflated by selection
-# on the test run and by a load_model cache bug that leaked test-run data into
-# the "pretrained" starting weights (see README).
+# Leave-one-run-out = the k=7 arm of the v2 sweep: checkpoint selection uses an
+# inner validation split carved from the training runs, the held-out run is
+# evaluated exactly once, and deep fits average over 3 seeds. The original
+# December leave_one_run_out rows are superseded and not used.
 
 def fig_loro(df):
     loro = v2_rows(df)
@@ -189,7 +187,7 @@ def fig_loro(df):
     ax2.set_xlabel("Mean accuracy ± s.d.")
     ax2.set_title("Mean across 8 runs", loc="left")
 
-    fig.suptitle("Leave-one-run-out generalization, leak-free protocol (chance = 50%)",
+    fig.suptitle("Leave-one-run-out generalization (2-class motor imagery, chance = 50%)",
                  x=0.005, y=1.03, ha="left", fontsize=13, fontweight="bold", color=INK)
     save(fig, "loro_generalization.png")
     return summary
