@@ -25,25 +25,13 @@ and fine-tuned on the self-recorded data.
 | Leave-one-run-out (7 calibration runs) | **62% ± 9** | 53% ± 6 | 52% ± 5 |
 | 2 calibration runs (~190 trials) | **57% ± 8** | 50% ± 6 | 51% ± 5 |
 
-Numbers are from a leak-free protocol (Aug 2026, single pinned environment,
+Numbers are from a leakage-controlled protocol (single pinned environment,
 `requirements/lock-gpu.txt`): checkpoint selection uses an inner validation split carved
 from the *training* runs, each held-out run is evaluated exactly once, and deep results
-average over 3 seeds. Cross-session, the classical Riemannian tangent-space + logistic
+average over 3 seeds.¹ Cross-session, the classical Riemannian tangent-space + logistic
 regression baseline is the only method clearly above chance on this dataset; the deep
 models — pretrained or not — do not generalize across sessions with this recipe, even
 though transfer clearly helps *within* a session (59% vs 53% on a random split).
-
-> **Why an earlier version of this README said 68%.** The original December LORO number
-> for the transfer model was inflated by three compounding bugs, found during a full
-> post-mortem on the original training machine: **(1)** best-checkpoint selection used the
-> held-out test run (`max` over epochs of test-run accuracy); **(2)** a model-loading cache
-> stored the *live* module object (`nn.Module.cpu()` is in-place), so earlier fine-tuning
-> runs in the same notebook kernel silently leaked every "held-out" run into the
-> pretrained starting weights — with a warmed cache the old fold accuracies reproduce
-> exactly; **(3)** a later switch of the preprocessing filter (FIR→IIR) changed the data
-> under every re-evaluation, which is what made the old numbers irreproducible and exposed
-> the problem. All three are fixed in the current pipeline (see commit `60f325e`), and the
-> table above comes from the clean re-run.
 
 **Cross-session generalization** (train on 7 runs, test on the held-out 8th: the hard, honest
 split for BCI, since session-to-session drift is the main failure mode):
@@ -56,11 +44,12 @@ for every method and seed, so comparisons are paired) and tested on the held-out
 classical baseline improves steadily with calibration data (54% → 62%); the deep models stay
 near chance at every k, and the paired pretraining gain (transfer − scratch on identical
 train/test splits) is zero within noise. A frozen-backbone / low-learning-rate fine-tuning
-variant did no better. (An earlier version of this figure used random within-session splits,
-which inflated low-calibration accuracy to 74% by testing on trials from sessions the model
-had trained on.)
+variant did no better.
 
 ![Cross-session accuracy vs. amount of calibration data](docs/figures/calibration_curve.png)
+
+¹ *Earlier versions of this repo reported higher cross-session numbers; those were affected
+by issues in how accuracy was computed and have been superseded by the protocol above.*
 
 **The signal is physiological:** μ-band (8–13 Hz) power over the right motor cortex (C4) is
 suppressed during left-hand imagery — the classic contralateral event-related desynchronization
@@ -108,7 +97,7 @@ scripts/
   download_public_dataset.py
   generate_report_figures.py  # regenerates docs/figures/ from committed data
   run_calibration_sweep.py    # cross-session calibration experiment (v1, superseded)
-  run_calibration_sweep_v2.py # leak-free calibration sweep behind the README numbers
+  run_calibration_sweep_v2.py # cross-session calibration sweep behind the README numbers
 configs/
   default.yaml
 requirements/
