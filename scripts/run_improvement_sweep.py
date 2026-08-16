@@ -67,6 +67,14 @@ CLASSICAL_ARMS = {
     "ts_stack":      dict(tmin=0.5, tmax=2.5, align="riemann", bands=FB_BANDS),
     "ts_stack_chan": dict(tmin=0.5, tmax=2.5, align="riemann", bands=FB_BANDS,
                           drop_channels=FRONTAL),
+    # First round showed the 2.5 s window is harmful (the discriminative signal
+    # dies after ~2 s) and it dragged down both stacks; retest the combinations
+    # at the standard 2.0 s window.
+    "ts_stack2":      dict(tmin=0.5, tmax=2.0, align="riemann", bands=FB_BANDS),
+    "ts_stack2_chan": dict(tmin=0.5, tmax=2.0, align="riemann", bands=FB_BANDS,
+                           drop_channels=FRONTAL),
+    "ts_align_chan":  dict(tmin=0.5, tmax=2.0, align="riemann",
+                           drop_channels=FRONTAL),
 }
 
 os.environ.setdefault("OMP_NUM_THREADS", "2")
