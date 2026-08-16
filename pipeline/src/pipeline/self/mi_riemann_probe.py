@@ -41,10 +41,18 @@ def load_epochs_from_input(path, epoch_tmin, epoch_tmax):
         )
         return epochs
 
-def load_epochs_for_subject(subject, data_dir, epoch_tmin, epoch_tmax, runs=None):
+def load_epochs_for_subject(subject, data_dir, epoch_tmin, epoch_tmax, runs=None,
+                            reject_by_annotation=True):
     """
     Load and concatenate epochs across all runs for a subject from raw FIFs
     saved by the online pipeline (pattern: sub-<ID>_run-XX_online_raw.fif).
+
+    The online pipeline saved each session as concatenated buffer chunks, so the
+    FIFs carry per-trial 'BAD boundary' annotations even though the underlying
+    stream is continuous (inter-event sample spacing matches the real-time trial
+    period). With the default reject_by_annotation=True, windows longer than
+    ~2 s post-cue lose most epochs to those annotations; pass False to epoch
+    across them (needed for any analysis window beyond 2.0 s).
     """
     data_dir = Path(data_dir)
     if runs is None:
@@ -70,7 +78,8 @@ def load_epochs_for_subject(subject, data_dir, epoch_tmin, epoch_tmax, runs=None
             picks="eeg",
             preload=True,
             verbose=False,
-            on_missing='ignore'
+            on_missing='ignore',
+            reject_by_annotation=reject_by_annotation,
         )
         run_id = int(str(f).split('_run-')[1][:2])
         ep.metadata = pd.DataFrame({"run": np.full(len(ep), run_id)})
@@ -194,6 +203,125 @@ def ts_lr_runwise_accuracy(
     model = fit_ts_lr(Xtr, ytr, cov_est=cov_est)
     acc, _ = score_ts_lr(model, Xte, yte)
     return acc
+
+
+# ---- v2: session alignment, filter bank, channel picks, real CSD ----------
+
+# OpenBCI Cyton+Daisy default 10-20 layout in board channel order; the committed
+# FIFs use generic names C1..C16 (same mapping as legacy/experiment/evaluate_mi_data.py
+# and scripts/generate_report_figures.py).
+ELECTRODES_1020 = [
+    "Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2",
+    "F7", "F8", "F3", "F4", "T7", "T8", "P3", "P4",
+]
+FRONTAL_CHANNELS = ["Fp1", "Fp2", "F7", "F8"]
+
+
+def set_true_montage(epochs):
+    """Rename generic C1..C16 channels to the physical 10-20 layout and attach
+    the standard montage (needed for a real CSD and for name-based picks)."""
+    ep = epochs.copy()
+    eeg_names = [ch for ch in ep.ch_names if ch.startswith("C") and ch[1:].isdigit()]
+    if eeg_names:
+        mapping = {ch: ELECTRODES_1020[int(ch[1:]) - 1] for ch in eeg_names}
+        ep.rename_channels(mapping)
+        ep.set_montage(mne.channels.make_standard_montage("standard_1020"),
+                       on_missing="ignore")
+    return ep
+
+
+def _session_references(covs, groups, metric):
+    """Mean covariance per session (unlabeled). metric: 'euclid' | 'riemann'."""
+    from pyriemann.utils.mean import mean_euclid, mean_riemann
+
+    mean_fn = mean_euclid if metric == "euclid" else mean_riemann
+    return {g: mean_fn(covs[groups == g]) for g in np.unique(groups)}
+
+
+def _align_covs(covs, groups, refs):
+    """Recenter each trial covariance by its session reference: R^-1/2 C R^-1/2."""
+    from pyriemann.utils.base import invsqrtm
+
+    out = np.empty_like(covs)
+    for g, ref in refs.items():
+        w = invsqrtm(ref)
+        idx = np.where(groups == g)[0]
+        out[idx] = w @ covs[idx] @ w
+    return out
+
+
+def ts_lr_runwise_accuracy_v2(
+    epochs_train,
+    epochs_test,
+    *,
+    tmin: float = 0.5,
+    tmax: float = 2.0,
+    cov_est: str = "lwf",
+    align: str = None,          # None | 'euclid' | 'riemann' (session-wise recentering)
+    bands=None,                 # None => broadband; else [(lo, hi), ...] filter bank
+    drop_channels=None,         # 10-20 names to exclude (e.g. FRONTAL_CHANNELS)
+    use_csd: bool = False,      # real CSD (montage is attached first)
+    classes=None,
+):
+    """
+    TS+LR with optional session-wise covariance alignment, filter bank,
+    channel exclusion, and a real surface-Laplacian (CSD).
+
+    Alignment recenters each session's trial covariances at that session's own
+    (unlabeled) mean, so the test session is aligned without using its labels —
+    the standard Euclidean/Riemannian alignment setup for cross-session MI.
+    Session membership comes from epochs.metadata['run'].
+    """
+    if classes is None:
+        classes = pick_left_right(epochs_train)
+
+    def prepare(epochs):
+        ep = set_true_montage(epochs)
+        if drop_channels:
+            keep = [ch for ch in ep.ch_names if ch not in set(drop_channels)]
+            ep.pick(keep)
+        if use_csd:
+            ep = mne.preprocessing.compute_current_source_density(ep)
+        groups = (ep.metadata["run"].to_numpy() if ep.metadata is not None
+                  and "run" in ep.metadata else np.zeros(len(ep), dtype=int))
+        # class subsetting must subset groups identically
+        sel = np.isin(ep.events[:, -1], [ep.event_id[c] for c in classes])
+        ep2, X, y = crop_and_get_Xy(ep, classes, tmin, tmax)
+        return ep2, X, y, groups[sel]
+
+    ep_tr, Xtr, ytr, g_tr = prepare(epochs_train)
+    _, Xte, yte, g_te = prepare(epochs_test)
+    # test session(s) get distinct group ids so references never mix splits
+    g_te = g_te + 1000
+
+    band_list = list(bands) if bands else [None]
+    sfreq = float(ep_tr.info["sfreq"])
+    Z_tr_parts, Z_te_parts = [], []
+    for band in band_list:
+        if band is None:
+            Xtr_b, Xte_b = Xtr, Xte
+        else:
+            from mne.filter import filter_data
+
+            Xtr_b = filter_data(Xtr, sfreq, band[0], band[1], verbose=False, n_jobs=1)
+            Xte_b = filter_data(Xte, sfreq, band[0], band[1], verbose=False, n_jobs=1)
+        cov = Covariances(estimator=cov_est)
+        Ctr = cov.fit_transform(Xtr_b)
+        Cte = cov.transform(Xte_b)
+        if align:
+            refs_tr = _session_references(Ctr, g_tr, align)
+            refs_te = _session_references(Cte, g_te, align)
+            Ctr = _align_covs(Ctr, g_tr, refs_tr)
+            Cte = _align_covs(Cte, g_te, refs_te)
+        ts = TangentSpace(metric="riemann")
+        Z_tr_parts.append(ts.fit_transform(Ctr))
+        Z_te_parts.append(ts.transform(Cte))
+
+    Ztr = np.concatenate(Z_tr_parts, axis=1)
+    Zte = np.concatenate(Z_te_parts, axis=1)
+    lr = LogisticRegression(max_iter=2000, solver="lbfgs")
+    lr.fit(Ztr, ytr)
+    return float(accuracy_score(yte, lr.predict(Zte)))
 
 def erd_barplot(epochs, baseline=(-1.0, 0.0), active=(0.5, 2.0), use_csd=True):
     chs = epochs.ch_names

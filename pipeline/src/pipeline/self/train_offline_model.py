@@ -95,6 +95,24 @@ def _load_raw_runs(
     return raw_data, sfreq
 
 
+def _euclidean_align_runs(
+    raw_data: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Per-session Euclidean alignment (He & Wu 2020): whiten each run's trials by
+    the run-mean trial covariance. Uses no labels, so applying it to a held-out
+    run is legitimate (and mirrors what an online system could do after observing
+    unlabeled trials from the new session)."""
+    aligned: List[Tuple[np.ndarray, np.ndarray]] = []
+    for X, y in raw_data:
+        covs = np.einsum("nct,ndt->ncd", X, X) / X.shape[2]
+        R = covs.mean(axis=0)
+        d, V = np.linalg.eigh(R)
+        d = np.clip(d, 1e-12 * float(d.max()), None)
+        W = V @ np.diag(d ** -0.5) @ V.T
+        aligned.append((np.einsum("cd,ndt->nct", W, X), y))
+    return aligned
+
+
 def _concat_truncate(raw_data: List[Tuple[np.ndarray, np.ndarray]], common_length: int) -> Tuple[np.ndarray, np.ndarray]:
     X = np.concatenate([d[0][:, :, :common_length] for d in raw_data], axis=0)
     y = np.concatenate([d[1] for d in raw_data], axis=0)
@@ -128,6 +146,7 @@ def train_and_eval_on_runs(
     notes_extra: str = "",
     filter_method: str = "iir",
     inner_val_frac: float = 0.0,
+    session_align: bool = False,
 ) -> float:
     """
     Train on an explicit list of runs and evaluate on held-out runs.
@@ -155,6 +174,10 @@ def train_and_eval_on_runs(
     train_raw, sfreq_train = _load_raw_runs(data_dir, subject, train_runs_s, filter_method=filter_method)
     test_raw, sfreq_test = _load_raw_runs(data_dir, subject, test_runs_s, filter_method=filter_method)
     sfreq = sfreq_train if sfreq_train else sfreq_test
+
+    if session_align:
+        train_raw = _euclidean_align_runs(train_raw)
+        test_raw = _euclidean_align_runs(test_raw)
 
     # Determine common time dimension divisible by 32 across BOTH splits
     n_times_list = [d[0].shape[2] for d in (train_raw + test_raw)]
@@ -193,6 +216,7 @@ def train_and_eval_on_runs(
     args.test_runs = test_runs_s
     args.val_split = float(inner_val_frac)  # 0.0 = legacy leaky selection on the test runs
     args.filter_method = str(filter_method)
+    args.session_align = bool(session_align)
     args.seed = int(seed)
     args.n_epochs = int(n_epochs)
     args.batch_size = int(batch_size)
@@ -542,6 +566,7 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
             "seed": getattr(args, "seed", None),
             "val_split": getattr(args, "val_split", None),
             "filter": getattr(args, "filter_method", None),
+            "align": ("euclid" if getattr(args, "session_align", False) else None),
             "split": getattr(args, "split", None),
             "train_runs": getattr(args, "train_runs", None),
             # Prefer a single held-out run tag if it's exactly one run
