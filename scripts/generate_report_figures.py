@@ -112,6 +112,8 @@ def load_metrics():
     df = pd.read_csv(METRICS_CSV)
     df["split"] = df["notes"].apply(lambda s: parse_note(s, "split") or "random_stratified")
     df["test_run"] = df["notes"].apply(lambda s: parse_note(s, "test_run"))
+    df["recipe"] = df["notes"].apply(lambda s: parse_note(s, "recipe"))
+    df["filter"] = df["notes"].apply(lambda s: parse_note(s, "filter"))
     runs = df["notes"].apply(
         lambda s: re.search(r"runs=\[(.*?)\]", str(s)).group(1) if re.search(r"runs=\[(.*?)\]", str(s)) else ""
     )
@@ -119,19 +121,41 @@ def load_metrics():
     return df
 
 
+def v2_rows(df):
+    """Leak-free calibration_curve_v2 rows, restricted to the headline arms:
+    deep modes with the December hyperparameters on FIR-filtered data (the
+    filter the pretrained base model was trained with), TS+LR with its own
+    (unchanged) preprocessing. Deep rows average over 3 seeds downstream."""
+    v2 = df[df["split"] == "calibration_curve_v2"].copy()
+    v2["k"] = v2["notes"].str.extract(r";k=(\d)").astype(int)
+    v2["draw"] = v2["notes"].str.extract(r"draw=(\d)").fillna(0).astype(int)
+    v2["train_key"] = v2["notes"].str.extract(r"train_runs=\[([^\]]*)\]")[0]
+    deep = v2[(v2["recipe"] == "dec") & (v2["filter"] == "fir")]
+    classical = v2[v2["mode"] == "ts_lr"]
+    return pd.concat([deep, classical], ignore_index=True)
+
+
 # ---------------------------------------------------------------- figure 1: LORO
+#
+# Leave-one-run-out = the k=7 arm of the leak-free v2 sweep: checkpoint selection
+# uses an inner validation split carved from the training runs, the held-out run
+# is evaluated exactly once, and deep fits average over 3 seeds. The original
+# December leave_one_run_out rows are NOT used: they were inflated by selection
+# on the test run and by a load_model cache bug that leaked test-run data into
+# the "pretrained" starting weights (see README).
 
 def fig_loro(df):
-    loro = df[df["split"] == "leave_one_run_out"]
+    loro = v2_rows(df)
+    loro = loro[loro["k"] == 7]
     pivot = loro.pivot_table(index="test_run", columns="mode", values="val_accuracy", aggfunc="mean").sort_index()
     summary = loro.groupby("mode")["val_accuracy"].agg(["mean", "std"])
 
     fig, (ax1, ax2) = plt.subplots(
-        1, 2, figsize=(10.5, 4.0), gridspec_kw={"width_ratios": [2.4, 1.0], "wspace": 0.28}
+        1, 2, figsize=(10.5, 4.0), gridspec_kw={"width_ratios": [2.4, 1.0], "wspace": 0.42}
     )
 
     x = np.arange(len(pivot.index))
-    for mode in ["transfer", "ts_lr", "scratch"]:
+    for mode in ["ts_lr", "transfer", "scratch"]:
         ax1.plot(x, pivot[mode], "-o", color=SERIES[mode], linewidth=2,
                  markersize=7, markeredgecolor="white", markeredgewidth=1.5,
                  label=LABELS[mode], zorder=3)
@@ -145,7 +169,7 @@ def fig_loro(df):
     ax1.set_title("Accuracy by held-out run", loc="left")
     ax1.legend(loc="lower left", fontsize=9, handlelength=1.4)
 
-    order = ["transfer", "ts_lr", "scratch"]
+    order = ["ts_lr", "transfer", "scratch"]
     ypos = np.arange(len(order))[::-1]
     for yp, mode in zip(ypos, order):
         m, s = summary.loc[mode, "mean"], summary.loc[mode, "std"]
@@ -165,7 +189,7 @@ def fig_loro(df):
     ax2.set_xlabel("Mean accuracy ± s.d.")
     ax2.set_title("Mean across 8 runs", loc="left")
 
-    fig.suptitle("Leave-one-run-out generalization (2-class motor imagery, chance = 50%)",
+    fig.suptitle("Leave-one-run-out generalization, leak-free protocol (chance = 50%)",
                  x=0.005, y=1.03, ha="left", fontsize=13, fontweight="bold", color=INK)
     save(fig, "loro_generalization.png")
     return summary
@@ -173,43 +197,26 @@ def fig_loro(df):
 
 # ---------------------------------------------------------------- figure 2: calibration curve
 #
-# Cross-session protocol: for each held-out test run, train on k runs randomly
-# drawn from the other 7 (2 draws per test run, draws shared across methods so
-# comparisons are paired) and evaluate on the held-out run. k=7 is exactly LORO,
-# so those rows anchor the right edge of the curve.
+# Cross-session protocol (leak-free v2): for each held-out test run, train on k
+# runs randomly drawn from the other 7 (2 draws per test run, draws shared
+# across methods/seeds so comparisons are paired) and evaluate on the held-out
+# run once, with checkpoint selection on an inner validation split. k=7 is
+# exactly LORO, so those rows anchor the right edge of the curve.
 
 def fig_calibration(df):
-    cal = df[df["split"] == "calibration_curve"].copy()
-    if cal.empty:
-        print("skipping calibration curve: no split=calibration_curve rows in metrics CSV")
+    both = v2_rows(df)
+    if both.empty:
+        print("skipping calibration curve: no split=calibration_curve_v2 rows in metrics CSV")
         return None
-    cal["k"] = cal["notes"].str.extract(r"k=(\d)").astype(int)
-    cal["draw"] = cal["notes"].str.extract(r"draw=(\d)").fillna(0).astype(int)
-    cal["train_key"] = cal["notes"].str.extract(r"train_runs=\[([^\]]*)\]")[0]
-
-    loro = df[df["split"] == "leave_one_run_out"].copy()
-    loro["k"] = 7
-    loro["draw"] = 0
-    loro["train_key"] = loro["notes"].str.extract(r"train_runs=\[([^\]]*)\]")[0]
-    if (cal["k"] == 7).any():
-        # k=7 was re-run in the same environment as k<=4; the original LORO rows
-        # then serve as an independent anchor check rather than curve data.
-        both = cal
-        anchor = pd.DataFrame({
-            "loro_rows": loro.groupby("mode")["val_accuracy"].mean(),
-            "local_k7": cal[cal["k"] == 7].groupby("mode")["val_accuracy"].mean(),
-        })
-        print("k=7 anchor check (original LORO rows vs local re-run):")
-        print(anchor.round(3))
-    else:
-        both = pd.concat([cal, loro], ignore_index=True)
 
     ks = [1, 2, 4, 7]
     xpos = {k: i for i, k in enumerate(ks)}
     agg = both.groupby(["mode", "k"])["val_accuracy"].agg(["mean", "std", "count"]).reset_index()
 
-    # Paired transfer - scratch gain on identical (test_run, train set) pairs
-    pivot = both.pivot_table(index=["k", "test_run", "train_key"], columns="mode",
+    # Paired transfer - scratch gain: identical (test_run, train set, seed) fits
+    deep = both[both["mode"].isin(["transfer", "scratch"])].copy()
+    deep["seed"] = deep["notes"].apply(lambda s: parse_note(s, "seed"))
+    pivot = deep.pivot_table(index=["k", "test_run", "train_key", "seed"], columns="mode",
                              values="val_accuracy", aggfunc="mean").reset_index()
     pivot["gain"] = pivot["transfer"] - pivot["scratch"]
     gain = pivot.groupby("k")["gain"].agg(["mean", "std", "count"]).reset_index()
@@ -218,7 +225,7 @@ def fig_calibration(df):
         1, 2, figsize=(10.5, 4.2), gridspec_kw={"width_ratios": [1.35, 1.0], "wspace": 0.25}
     )
 
-    for mode in ["transfer", "ts_lr", "scratch"]:
+    for mode in ["ts_lr", "transfer", "scratch"]:
         sub = agg[agg["mode"] == mode].sort_values("k")
         x = [xpos[k] for k in sub["k"]]
         ax1.errorbar(x, sub["mean"], yerr=sub["std"], color=SERIES[mode], fmt="-o",

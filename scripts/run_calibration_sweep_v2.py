@@ -50,9 +50,9 @@ SEEDS = [0, 1, 2]
 FILTERS = ["fir", "iir"]
 INNER_VAL = 0.2
 EPOCH_TMIN, EPOCH_TMAX = 0.0, 2.0
-N_WORKERS = 3
+N_WORKERS = 12  # CPU-bound, ~single-threaded per fit; 12 keeps RAM headroom on a 31GB box
 
-os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("OMP_NUM_THREADS", "2")
 
 
 def _setup_paths():
@@ -61,7 +61,7 @@ def _setup_paths():
     sys.path.insert(0, str(REPO / "pipeline" / "src" / "pipeline" / "public"))
     import torch
 
-    torch.set_num_threads(4)
+    torch.set_num_threads(2)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     import numpy as np
@@ -87,6 +87,19 @@ def _setup_paths():
             return self
 
     mne.decoding.CSP.fit = _robust_fit
+
+    # feature_utils calls mne filter_data(..., n_jobs=-1) (hardcoded); with many
+    # sweep workers that spawns a joblib pool per worker and the machine thrashes.
+    # Force n_jobs=1 inside workers — parallelism comes from the worker pool.
+    import feature_utils
+
+    _orig_filter_data = feature_utils.filter_data
+
+    def _serial_filter_data(*args, **kwargs):
+        kwargs["n_jobs"] = 1
+        return _orig_filter_data(*args, **kwargs)
+
+    feature_utils.filter_data = _serial_filter_data
 
 
 def make_draws(k, test_run):
@@ -142,6 +155,20 @@ def run_task(task):
     except Exception as e:
         print(f"TASK FAILED {tag}: {type(e).__name__}: {e}", flush=True)
         return tag, float("nan"), time.time() - t0
+    finally:
+        # The band-filter and load_model caches grow without bound across tasks
+        # in a long-lived worker process; clear them so memory stays flat
+        # (unbounded _fb_filter_data_cache OOM'd a 31GB machine at 16 workers).
+        try:
+            import feature_utils
+            feature_utils._fb_filter_data_cache.clear()
+        except Exception:
+            pass
+        try:
+            import hybrid_cnn_transformer as _hct
+            _hct._load_model_cache.clear()
+        except Exception:
+            pass
 
 
 def _run_task_inner(task, tag, t0):
