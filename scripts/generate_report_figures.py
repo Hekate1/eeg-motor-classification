@@ -48,14 +48,16 @@ MUTED = "#898781"      # axis labels / ticks
 GRID = "#e1e0d9"       # hairline gridlines
 BASELINE = "#c3c2b7"   # axis spines
 SERIES = {             # color follows the entity across every figure
-    "transfer": "#2a78d6",  # blue
-    "scratch": "#eb6834",   # orange
-    "ts_lr": "#1baf7a",     # aqua
+    "transfer": "#2a78d6",       # blue
+    "scratch": "#eb6834",        # orange
+    "ts_lr": "#1baf7a",          # aqua
+    "ts_lr_aligned": "#8a56c9",  # violet
 }
 LABELS = {
     "transfer": "Transfer (pretrained, 90 subj.)",
     "scratch": "Deep net from scratch",
     "ts_lr": "Riemannian TS+LR",
+    "ts_lr_aligned": "TS+LR + session alignment",
 }
 CLASS_COLORS = {"Left": "#2a78d6", "Right": "#eb6834"}
 
@@ -132,7 +134,18 @@ def v2_rows(df):
     v2["train_key"] = v2["notes"].str.extract(r"train_runs=\[([^\]]*)\]")[0]
     deep = v2[(v2["recipe"] == "dec") & (v2["filter"] == "fir")]
     classical = v2[v2["mode"] == "ts_lr"]
-    return pd.concat([deep, classical], ignore_index=True)
+
+    # Aligned TS+LR (session-wise Riemannian recentering + filter bank + frontal
+    # channels dropped) from the improvement sweep; same paired draws as v2.
+    imp = df[df["split"] == "improvement_v1"].copy()
+    imp["arm"] = imp["notes"].str.extract(r"arm=([^;\"]+)")
+    aligned = imp[imp["arm"] == "ts_stack2_chan"].copy()
+    aligned["mode"] = "ts_lr_aligned"
+    aligned["k"] = aligned["notes"].str.extract(r";k=(\d)").astype(int)
+    aligned["draw"] = aligned["notes"].str.extract(r"draw=(\d)").fillna(0).astype(int)
+    aligned["train_key"] = aligned["notes"].str.extract(r"train_runs=\[([^\]]*)\]")[0]
+
+    return pd.concat([deep, classical, aligned], ignore_index=True)
 
 
 # ---------------------------------------------------------------- figure 1: LORO
@@ -153,7 +166,7 @@ def fig_loro(df):
     )
 
     x = np.arange(len(pivot.index))
-    for mode in ["ts_lr", "transfer", "scratch"]:
+    for mode in ["ts_lr_aligned", "ts_lr", "transfer", "scratch"]:
         ax1.plot(x, pivot[mode], "-o", color=SERIES[mode], linewidth=2,
                  markersize=7, markeredgecolor="white", markeredgewidth=1.5,
                  label=LABELS[mode], zorder=3)
@@ -165,9 +178,9 @@ def fig_loro(df):
     ax1.set_xlabel("Held-out run")
     ax1.set_ylabel("Accuracy on held-out run")
     ax1.set_title("Accuracy by held-out run", loc="left")
-    ax1.legend(loc="lower left", fontsize=9, handlelength=1.4)
+    ax1.legend(loc="upper center", fontsize=9, handlelength=1.4, ncol=2)
 
-    order = ["ts_lr", "transfer", "scratch"]
+    order = ["ts_lr_aligned", "ts_lr", "transfer", "scratch"]
     ypos = np.arange(len(order))[::-1]
     for yp, mode in zip(ypos, order):
         m, s = summary.loc[mode, "mean"], summary.loc[mode, "std"]
@@ -223,7 +236,7 @@ def fig_calibration(df):
         1, 2, figsize=(10.5, 4.2), gridspec_kw={"width_ratios": [1.35, 1.0], "wspace": 0.25}
     )
 
-    for mode in ["ts_lr", "transfer", "scratch"]:
+    for mode in ["ts_lr_aligned", "ts_lr", "transfer", "scratch"]:
         sub = agg[agg["mode"] == mode].sort_values("k")
         x = [xpos[k] for k in sub["k"]]
         ax1.errorbar(x, sub["mean"], yerr=sub["std"], color=SERIES[mode], fmt="-o",
@@ -238,7 +251,7 @@ def fig_calibration(df):
     ax1.set_xlabel("Calibration runs used for training")
     ax1.set_ylabel("Accuracy on held-out run (mean ± s.d.)")
     ax1.set_title("Accuracy on an unseen session", loc="left")
-    ax1.legend(loc="lower right", fontsize=9)
+    ax1.legend(loc="upper left", fontsize=9)
 
     from matplotlib.ticker import FuncFormatter
 
