@@ -21,6 +21,11 @@ draws as the v2 sweep, so all comparisons are paired):
   ts_stack_chan  ts_stack + frontal channels dropped
   transfer_ea    deep transfer (Dec recipe, FIR, inner-val) + per-session
                  Euclidean alignment of the raw trials, 3 seeds
+  transfer_remap    deep transfer + spherical-spline channel remap onto the
+                 base model's PhysioNet motor-strip montage (the legacy path
+                 fed it the first 14 board channels by index — spatially
+                 scrambled), 3 seeds
+  transfer_remap_ea remap + per-session Euclidean alignment, 3 seeds
 
 Rows merge idempotently into runs/self/results/offline_metrics.csv with
 split=improvement_v1 and tag= in notes. Resume-safe: one CSV per finished fit
@@ -146,10 +151,11 @@ def make_tasks():
                         "draw": d, "train_runs": list(subset),
                     })
                 for seed in DEEP_SEEDS:
-                    tasks.append({
-                        "arm": "transfer_ea", "seed": seed, "k": k,
-                        "test_run": test_run, "draw": d, "train_runs": list(subset),
-                    })
+                    for deep_arm in ("transfer_ea", "transfer_remap", "transfer_remap_ea"):
+                        tasks.append({
+                            "arm": deep_arm, "seed": seed, "k": k,
+                            "test_run": test_run, "draw": d, "train_runs": list(subset),
+                        })
     # Deep jobs first for GPU/CPU load balancing; classical fills gaps.
     tasks.sort(key=lambda t: (t["arm"] != "transfer_ea", -t["k"]))
     return tasks
@@ -191,7 +197,7 @@ def _run_task_inner(task, tag, t0):
     arm, k, test_run = task["arm"], task["k"], task["test_run"]
     train_runs, draw, seed = task["train_runs"], task["draw"], task["seed"]
 
-    if arm == "transfer_ea":
+    if arm.startswith("transfer_"):
         from pipeline.self.train_offline_model import train_and_eval_on_runs
 
         kwargs = dict(
@@ -216,7 +222,8 @@ def _run_task_inner(task, tag, t0):
             metric_name="test_accuracy",
             filter_method="fir",
             inner_val_frac=INNER_VAL,
-            session_align=True,
+            session_align=arm.endswith("_ea"),
+            channel_map=("interp" if "remap" in arm else "index"),
             notes_extra=(f"experiment={SPLIT_TAG};k={k};draw={draw};"
                          f"arm={arm};tag={tag}"),
         )

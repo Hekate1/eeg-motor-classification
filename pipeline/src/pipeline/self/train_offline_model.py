@@ -95,6 +95,46 @@ def _load_raw_runs(
     return raw_data, sfreq
 
 
+# Physical 10-20 layout of the OpenBCI Cyton+Daisy board, in channel order
+# (the FIFs use generic names C1..C16; same mapping as evaluate_mi_data.py).
+OPENBCI_CHANNELS_1020 = [
+    "Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2",
+    "F7", "F8", "F3", "F4", "T7", "T8", "P3", "P4",
+]
+# The public base model was trained on PhysioNet's 14 central/centro-parietal
+# channels, in this order (EDF names C5.. Cp6.; verified against the raw EDFs —
+# data_utils.load_subject_data picks ch.startswith(('C','FC','CP'))).
+BASE_MODEL_CHANNELS_1020 = [
+    "C5", "C3", "C1", "Cz", "C2", "C4", "C6",
+    "CP5", "CP3", "CP1", "CPz", "CP2", "CP4", "CP6",
+]
+
+
+def _interp_matrix_openbci_to_base() -> np.ndarray:
+    """Spherical-spline interpolation matrix (14 x 16) mapping the OpenBCI
+    electrode set onto the base model's expected PhysioNet motor-strip montage.
+
+    Without this, transfer fine-tuning fed the base model the first 14 board
+    channels by index (Fp1, Fp2, C3, C4, P7, ...) — spatially scrambled
+    relative to the montage the network was pretrained on.
+    """
+    import mne
+    from mne.channels.interpolation import _make_interpolation_matrix
+
+    pos = mne.channels.make_standard_montage("standard_1020").get_positions()["ch_pos"]
+    pos_from = np.array([pos[ch] for ch in OPENBCI_CHANNELS_1020])
+    pos_to = np.array([pos[ch] for ch in BASE_MODEL_CHANNELS_1020])
+    return _make_interpolation_matrix(pos_from, pos_to)
+
+
+def _interp_runs_to_base_montage(
+    raw_data: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Map each run's (n, 16, t) trials onto the base model's 14-channel montage."""
+    M = _interp_matrix_openbci_to_base()
+    return [(np.einsum("oc,nct->not", M, X), y) for X, y in raw_data]
+
+
 def _euclidean_align_runs(
     raw_data: List[Tuple[np.ndarray, np.ndarray]],
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
@@ -147,6 +187,7 @@ def train_and_eval_on_runs(
     filter_method: str = "iir",
     inner_val_frac: float = 0.0,
     session_align: bool = False,
+    channel_map: str = "index",  # "index" (legacy truncate/pad) | "interp"
 ) -> float:
     """
     Train on an explicit list of runs and evaluate on held-out runs.
@@ -174,6 +215,12 @@ def train_and_eval_on_runs(
     train_raw, sfreq_train = _load_raw_runs(data_dir, subject, train_runs_s, filter_method=filter_method)
     test_raw, sfreq_test = _load_raw_runs(data_dir, subject, test_runs_s, filter_method=filter_method)
     sfreq = sfreq_train if sfreq_train else sfreq_test
+
+    if channel_map == "interp":
+        # Interpolate onto the base model's montage BEFORE alignment, so
+        # alignment standardizes the distribution the network actually sees.
+        train_raw = _interp_runs_to_base_montage(train_raw)
+        test_raw = _interp_runs_to_base_montage(test_raw)
 
     if session_align:
         train_raw = _euclidean_align_runs(train_raw)
@@ -217,6 +264,7 @@ def train_and_eval_on_runs(
     args.val_split = float(inner_val_frac)  # 0.0 = legacy leaky selection on the test runs
     args.filter_method = str(filter_method)
     args.session_align = bool(session_align)
+    args.channel_map = str(channel_map)
     args.seed = int(seed)
     args.n_epochs = int(n_epochs)
     args.batch_size = int(batch_size)
@@ -567,6 +615,8 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
             "val_split": getattr(args, "val_split", None),
             "filter": getattr(args, "filter_method", None),
             "align": ("euclid" if getattr(args, "session_align", False) else None),
+            "channel_map": (getattr(args, "channel_map", None)
+                            if getattr(args, "channel_map", "index") != "index" else None),
             "split": getattr(args, "split", None),
             "train_runs": getattr(args, "train_runs", None),
             # Prefer a single held-out run tag if it's exactly one run
