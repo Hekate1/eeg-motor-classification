@@ -1,10 +1,108 @@
 # EEG Motor Imagery Classification (Headset App + Training Pipeline + Results)
 
+![Demo replay of the online BCI frontend](docs/figures/demo_replay.gif)
+
+*The PsychoPy frontend decoding recorded EEG in replay mode: the bars show the classifier's
+left/right probability updating as each imagery epoch streams in. Runs with zero hardware:*
+`eeg-headset-frontend --demo-fif data/self/sub-01_run-01_online_raw.fif`
+
 This repo is an end-to-end motor-imagery EEG project with three runnable components:
 
 1) **Headset-facing “frontend” app** (PsychoPy + BrainFlow) for online cueing + feedback  
 2) **Offline processing + model training pipeline** (classical + deep learning; transfer learning supported)  
 3) **Results notebook** that summarizes offline accuracies across settings (and saves plots/tables)
+
+## Results at a glance
+
+All results are 2-class (left vs. right hand) motor imagery for a single subject: ~770 trials
+self-recorded over 8 sessions with a 16-channel OpenBCI Cyton + Daisy. **Chance is 50%.**
+The deep model is a hybrid CNN–Transformer; “transfer” means it was pretrained on 90 subjects
+from the [PhysioNet EEG Motor Movement/Imagery dataset](https://physionet.org/content/eegmmidb/1.0.0/)
+and fine-tuned on the self-recorded data.
+
+| Evaluation (both cross-session) | TS+LR + session alignment | Riemannian TS+LR | Transfer (pretrained) | Deep net from scratch |
+|---|---|---|---|---|
+| Leave-one-run-out (7 calibration runs) | **63% ± 7** | 62% ± 9 | 53% ± 6 | 52% ± 5 |
+| 1 calibration run (~95 trials) | **57% ± 8** | 54% ± 6 | 50% ± 5 | 51% ± 4 |
+
+Numbers are from a leakage-controlled protocol (single pinned environment,
+`requirements/lock-gpu.txt`): checkpoint selection uses an inner validation split carved
+from the *training* runs, each held-out run is evaluated exactly once, and deep results
+average over 3 seeds.¹ Cross-session, the classical Riemannian tangent-space + logistic
+regression pipelines are the only methods clearly above chance on this dataset; the deep
+models — pretrained or not — do not generalize across sessions with this recipe, even
+though transfer clearly helps *within* a session (59% vs 53% on a random split).
+
+The best method recenters each session's trial covariances at that session's own mean
+(Riemannian session alignment) before the tangent-space projection, adds filter-bank
+sub-band features (8–12/12–16/16–22/22–30 Hz), and drops the four frontal-most channels.
+Each choice was validated on paired train/test draws against the plain baseline
+(+2.8 points overall, Wilcoxon p = 0.003, n = 56 paired configurations). Alignment needs
+no labels from the new session, so it works online. Its biggest effect is where it matters
+practically — the low-calibration end: **one aligned calibration run matches what the
+unaligned baseline needs 2–4 runs to reach**, roughly halving setup time for a new session.
+
+**Cross-session generalization** (train on 7 runs, test on the held-out 8th: the hard, honest
+split for BCI, since session-to-session drift is the main failure mode):
+
+![Leave-one-run-out generalization](docs/figures/loro_generalization.png)
+
+**How much calibration data does a new session need?** For each held-out run, models were
+trained on k runs drawn at random from the other 7 (two draws per test run, identical draws
+for every method and seed, so comparisons are paired) and tested on the held-out run. The
+classical pipelines improve steadily with calibration data (57% → 63% aligned); the deep
+models stay near chance at every k, and the paired pretraining gain (transfer − scratch on
+identical train/test splits) is zero within noise. A frozen-backbone / low-learning-rate
+fine-tuning variant did no better; per-session Euclidean alignment of the raw trials lifts
+transfer to 55.5% at LORO — a real (+1 pt paired) but modest effect that still trails the
+classical pipeline.
+
+![Cross-session accuracy vs. amount of calibration data](docs/figures/calibration_curve.png)
+
+**Other findings from the improvement sweep** (840 paired fits, `split=improvement_v1` in
+the metrics CSV):
+
+- **The usable signal lives in 0.5–2.0 s post-cue.** These sessions hold 2.5 s of imagery
+  per trial, but extending the analysis window to 2.5 s *costs* 4.9 points paired — class
+  separability collapses in the final half-second, when the on-screen feedback ends.
+- **Frontal channels hurt generalization.** Dropping Fp1/Fp2/F7/F8 helps (+1.1 paired)
+  — consistent with the frontally-dominated CSP patterns below: ocular activity carries
+  class-correlated variance within a session that does not survive session drift.
+- **Session drift is partly physical.** μ-band ERD lateralization at C3/C4 varies strongly
+  across sessions and even reverses sign in two of them (`scripts/diagnose_runs.py`),
+  pointing at electrode repositioning between sessions as a major drift source — exactly
+  the kind of spatial shift covariance alignment can partially absorb.
+- A surface Laplacian (CSD) did not help (−1.2 paired).
+
+¹ *Earlier versions of this repo reported higher cross-session numbers; those were affected
+by issues in how accuracy was computed and have been superseded by the protocol above.*
+
+**The signal is physiological:** μ-band (8–13 Hz) power over the right motor cortex (C4) is
+suppressed during left-hand imagery — the classic contralateral event-related desynchronization
+that motor-imagery BCIs are built on. The effect is weaker over C3, one reason single-session
+accuracy tops out where it does.
+
+![Class-conditional spectra at C3/C4](docs/figures/erd_spectra.png)
+
+<details>
+<summary><b>More figures:</b> confusion matrices & CSP spatial patterns</summary>
+
+![Validation confusion matrices](docs/figures/confusion_matrices.png)
+
+CSP spatial patterns (8–30 Hz), fit on all runs. The leading patterns are frontally
+dominated, a sign that residual ocular/frontal activity still carries class-correlated
+variance after preprocessing. That is a well-known caveat for motor-imagery BCIs and part
+of the motivation for the run-wise evaluation above:
+
+![CSP spatial patterns](docs/figures/csp_patterns.png)
+
+</details>
+
+All figures are regenerated from the committed data and metrics with:
+
+```bash
+python scripts/generate_report_figures.py
+```
 
 ## Repo layout
 
@@ -18,15 +116,23 @@ notebooks/
   results_summary.ipynb       # report notebook (repo-relative paths)
 data/
   self/                       # self-collected FIF runs (sanitized)
+docs/
+  figures/                    # report figures embedded above (regenerable)
 scripts/
   sanitize_fif_metadata.py
   download_public_dataset.py
+  generate_report_figures.py  # regenerates docs/figures/ from committed data
+  run_calibration_sweep.py    # cross-session calibration experiment (v1, superseded)
+  run_calibration_sweep_v2.py # cross-session calibration sweep behind the README numbers
+  run_improvement_sweep.py    # paired sweep: alignment / filter bank / window / channels
+  diagnose_runs.py            # per-session signal-quality diagnostics
 configs/
   default.yaml
 requirements/
   base.txt
   frontend.txt
   ml.txt
+  lock-gpu.txt                # pinned environment behind the README numbers
 legacy/                       # snapshot of the original project layout (for reference)
 ```
 
@@ -122,7 +228,7 @@ Outputs are written under `runs/self/` by default.
 ### 3) Results notebook
 
 Open:
-- `notebooks/results_summary.ipynb`
+- `notebooks/results_summary.ipynb` ([view rendered on nbviewer](https://nbviewer.org/github/Hekate1/eeg-motor-classification/blob/main/notebooks/results_summary.ipynb))
 
 The first setup cell finds the repo root automatically and uses:
 - self-data: `data/self/`

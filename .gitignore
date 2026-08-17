@@ -37,7 +37,9 @@ runs/
 !runs/self/results/**
 !runs/self/models/
 !runs/self/models/**
+# Sweep working dirs (per-fit checkpoints/rows; merged into results CSV)
+runs/self/calibration_sweep_v2/
+runs/self/improvement_sweep/
 
 # Jupyter
 notebooks/.ipynb_checkpoints/
-

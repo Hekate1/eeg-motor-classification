@@ -180,8 +180,14 @@ class HybridModelClassifier:
             assert os.path.exists(config_path), f"Config file not found: {config_path}"
             dprint(f"Loading configuration from {config_path}")
             config_data = torch.load(config_path, map_location=device, weights_only=False)
-            # Cache a CPU copy of the model and its configuration
-            _load_model_cache[filepath] = (model.cpu(), config_data)
+            # Cache a pristine CPU copy of the model and its configuration.
+            # CRITICAL: nn.Module.cpu()/.to() operate IN PLACE and return self,
+            # so the cache must hold a deepcopy that is never handed to callers.
+            # Caching `model.cpu()` directly aliases the caller's model: any
+            # subsequent fine-tuning mutates the cached weights, and every later
+            # load_model() of the same path returns already-trained weights
+            # (cross-experiment contamination / test-set leakage).
+            _load_model_cache[filepath] = (copy.deepcopy(model).cpu(), config_data)
             # Move model back to requested device
             model = model.to(device)
 
@@ -686,11 +692,13 @@ class HybridModelClassifier:
                             y_test_batch = y_test[start_idx:end_idx]
                             
                             # Get feature modules output if needed
+                            # (subject indices must be sliced to match the batch)
+                            test_subj_batch = test_subject_indices[start_idx:end_idx] if test_subject_indices is not None else None
                             X_test_feat_batch = None
                             if hasattr(self, 'feature_modules') and self.feature_modules and self.use_feature_modules:
                                 feat_test_list = []
                                 for mod in self.feature_modules:
-                                    feat_test = mod.transform(X_test_batch, test_subject_indices)
+                                    feat_test = mod.transform(X_test_batch, test_subj_batch)
                                     if not torch.is_tensor(feat_test):
                                         feat_test = torch.tensor(feat_test, dtype=torch.float32)
                                     feat_test_list.append(feat_test)

@@ -8,6 +8,7 @@ import sys
 import argparse
 import csv
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -70,6 +71,7 @@ def _load_raw_runs(
     data_dir: Path,
     subject: str,
     runs: Sequence[Union[str, int]],
+    filter_method: str = "iir",
 ) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], float]:
     """Load and epoch a set of raw FIF runs for a single subject."""
     runs_s = _as_run_str_list(runs)
@@ -82,7 +84,8 @@ def _load_raw_runs(
         raw = mne.io.read_raw_fif(str(path), preload=True, verbose=False)
         sfreq = float(raw.info["sfreq"])
         events = mne.find_events(raw, stim_channel="STI 014", shortest_event=1)
-        X_run, y_run = preprocess_epoch_data(raw, events, EPOCH_TMIN, EPOCH_TMAX)
+        X_run, y_run = preprocess_epoch_data(raw, events, EPOCH_TMIN, EPOCH_TMAX,
+                                             filter_method=filter_method)
         y_run = y_run - 1  # 1/2 -> 0/1
         raw_data.append((X_run, y_run))
     if not raw_data:
@@ -90,6 +93,64 @@ def _load_raw_runs(
     if sfreq is None:
         raise RuntimeError("Failed to determine sampling rate (sfreq)")
     return raw_data, sfreq
+
+
+# Physical 10-20 layout of the OpenBCI Cyton+Daisy board, in channel order
+# (the FIFs use generic names C1..C16; same mapping as evaluate_mi_data.py).
+OPENBCI_CHANNELS_1020 = [
+    "Fp1", "Fp2", "C3", "C4", "P7", "P8", "O1", "O2",
+    "F7", "F8", "F3", "F4", "T7", "T8", "P3", "P4",
+]
+# The public base model was trained on PhysioNet's 14 central/centro-parietal
+# channels, in this order (EDF names C5.. Cp6.; verified against the raw EDFs —
+# data_utils.load_subject_data picks ch.startswith(('C','FC','CP'))).
+BASE_MODEL_CHANNELS_1020 = [
+    "C5", "C3", "C1", "Cz", "C2", "C4", "C6",
+    "CP5", "CP3", "CP1", "CPz", "CP2", "CP4", "CP6",
+]
+
+
+def _interp_matrix_openbci_to_base() -> np.ndarray:
+    """Spherical-spline interpolation matrix (14 x 16) mapping the OpenBCI
+    electrode set onto the base model's expected PhysioNet motor-strip montage.
+
+    Without this, transfer fine-tuning fed the base model the first 14 board
+    channels by index (Fp1, Fp2, C3, C4, P7, ...) — spatially scrambled
+    relative to the montage the network was pretrained on.
+    """
+    import mne
+    from mne.channels.interpolation import _make_interpolation_matrix
+
+    pos = mne.channels.make_standard_montage("standard_1020").get_positions()["ch_pos"]
+    pos_from = np.array([pos[ch] for ch in OPENBCI_CHANNELS_1020])
+    pos_to = np.array([pos[ch] for ch in BASE_MODEL_CHANNELS_1020])
+    return _make_interpolation_matrix(pos_from, pos_to)
+
+
+def _interp_runs_to_base_montage(
+    raw_data: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Map each run's (n, 16, t) trials onto the base model's 14-channel montage."""
+    M = _interp_matrix_openbci_to_base()
+    return [(np.einsum("oc,nct->not", M, X), y) for X, y in raw_data]
+
+
+def _euclidean_align_runs(
+    raw_data: List[Tuple[np.ndarray, np.ndarray]],
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Per-session Euclidean alignment (He & Wu 2020): whiten each run's trials by
+    the run-mean trial covariance. Uses no labels, so applying it to a held-out
+    run is legitimate (and mirrors what an online system could do after observing
+    unlabeled trials from the new session)."""
+    aligned: List[Tuple[np.ndarray, np.ndarray]] = []
+    for X, y in raw_data:
+        covs = np.einsum("nct,ndt->ncd", X, X) / X.shape[2]
+        R = covs.mean(axis=0)
+        d, V = np.linalg.eigh(R)
+        d = np.clip(d, 1e-12 * float(d.max()), None)
+        W = V @ np.diag(d ** -0.5) @ V.T
+        aligned.append((np.einsum("cd,ndt->nct", W, X), y))
+    return aligned
 
 
 def _concat_truncate(raw_data: List[Tuple[np.ndarray, np.ndarray]], common_length: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -123,21 +184,47 @@ def train_and_eval_on_runs(
     split_tag: str = "explicit_runs",
     metric_name: str = "val_accuracy",
     notes_extra: str = "",
+    filter_method: str = "iir",
+    inner_val_frac: float = 0.0,
+    session_align: bool = False,
+    channel_map: str = "index",  # "index" (legacy truncate/pad) | "interp"
 ) -> float:
     """
     Train on an explicit list of runs and evaluate on held-out runs.
 
     This is the entrypoint used by `offline_analysis.ipynb` for run-wise splits
     (e.g., LORO / holdout). The held-out-run accuracy is logged into `val_accuracy`.
+
+    With ``inner_val_frac > 0``, a stratified fraction of the TRAINING trials is
+    carved out as the fit-time validation set (used for best-checkpoint selection),
+    and the held-out test runs are only tracked per-epoch (history['test_acc']) and
+    evaluated once on the selected checkpoint — i.e., no model-selection leakage.
+    With ``inner_val_frac == 0`` the legacy (leaky) behavior is preserved: the test
+    runs occupy the fit-time validation slot and selection happens on them.
     """
     train_runs_s = _as_run_str_list(train_runs)
     test_runs_s = _as_run_str_list(test_runs)
     if not train_runs_s or not test_runs_s:
         raise ValueError(f"train_runs and test_runs must both be non-empty (got train={train_runs_s}, test={test_runs_s})")
 
-    train_raw, sfreq_train = _load_raw_runs(data_dir, subject, train_runs_s)
-    test_raw, sfreq_test = _load_raw_runs(data_dir, subject, test_runs_s)
+    # Seed everything (December runs recorded a seed but never applied it)
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    torch.manual_seed(int(seed))
+
+    train_raw, sfreq_train = _load_raw_runs(data_dir, subject, train_runs_s, filter_method=filter_method)
+    test_raw, sfreq_test = _load_raw_runs(data_dir, subject, test_runs_s, filter_method=filter_method)
     sfreq = sfreq_train if sfreq_train else sfreq_test
+
+    if channel_map == "interp":
+        # Interpolate onto the base model's montage BEFORE alignment, so
+        # alignment standardizes the distribution the network actually sees.
+        train_raw = _interp_runs_to_base_montage(train_raw)
+        test_raw = _interp_runs_to_base_montage(test_raw)
+
+    if session_align:
+        train_raw = _euclidean_align_runs(train_raw)
+        test_raw = _euclidean_align_runs(test_raw)
 
     # Determine common time dimension divisible by 32 across BOTH splits
     n_times_list = [d[0].shape[2] for d in (train_raw + test_raw)]
@@ -146,8 +233,23 @@ def train_and_eval_on_runs(
     if common_length <= 0:
         raise ValueError(f"Common time length too small: {min_n_times}")
 
-    X_train, y_train = _concat_truncate(train_raw, common_length)
-    X_val, y_val = _concat_truncate(test_raw, common_length)
+    X_train_all, y_train_all = _concat_truncate(train_raw, common_length)
+    X_test, y_test = _concat_truncate(test_raw, common_length)
+
+    if inner_val_frac > 0.0:
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_train_all, y_train_all,
+            test_size=float(inner_val_frac),
+            stratify=y_train_all,
+            random_state=int(seed),
+        )
+        idx_test = np.zeros(len(y_test), dtype=int)
+    else:
+        # Legacy: the held-out runs are the fit-time "validation" set
+        X_train, y_train = X_train_all, y_train_all
+        X_val, y_val = X_test, y_test
+        idx_test = None
+
     idx_train = np.zeros(len(y_train), dtype=int)
     idx_val = np.zeros(len(y_val), dtype=int)
     subjects = [str(subject)]
@@ -159,7 +261,10 @@ def train_and_eval_on_runs(
     args.runs = all_runs
     args.train_runs = train_runs_s
     args.test_runs = test_runs_s
-    args.val_split = 0.0  # explicit split; not used for train/val selection
+    args.val_split = float(inner_val_frac)  # 0.0 = legacy leaky selection on the test runs
+    args.filter_method = str(filter_method)
+    args.session_align = bool(session_align)
+    args.channel_map = str(channel_map)
     args.seed = int(seed)
     args.n_epochs = int(n_epochs)
     args.batch_size = int(batch_size)
@@ -193,25 +298,28 @@ def train_and_eval_on_runs(
         subjects,
         all_runs,
         sfreq,
+        X_test=(X_test if inner_val_frac > 0.0 else None),
+        y_test=(y_test if inner_val_frac > 0.0 else None),
+        idx_test=idx_test,
     )
 
-    # Return the last-eval accuracy that was logged/surfaced
-    # (train_deep_model prints it; here we recompute quickly from the saved model)
+    # Return the held-out-run accuracy of the saved (selected) checkpoint.
+    # In legacy mode X_test == the fit-time validation set, so behavior is unchanged.
     model_path = args.output_dir / f"{args.model_name}.pt"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
-    y_val_t = torch.tensor(y_val, dtype=torch.long, device=device)
-    idx_val_t = torch.tensor(idx_val, dtype=torch.long, device=device)
+    X_eval_t = torch.tensor(X_test, dtype=torch.float32, device=device)
+    y_eval_t = torch.tensor(y_test, dtype=torch.long, device=device)
+    idx_eval_t = torch.zeros(len(y_test), dtype=torch.long, device=device)
     best_clf, _ = HybridModelClassifier.load_model(str(model_path), device=device)
-    target_channels = getattr(best_clf.model, "n_channels", X_val_t.shape[1])
-    if X_val_t.size(1) != target_channels:
+    target_channels = getattr(best_clf.model, "n_channels", X_eval_t.shape[1])
+    if X_eval_t.size(1) != target_channels:
         # match channels for transfer models
-        if X_val_t.size(1) < target_channels:
-            pad = torch.zeros(X_val_t.size(0), target_channels - X_val_t.size(1), X_val_t.size(2), device=device)
-            X_val_t = torch.cat([X_val_t, pad], dim=1)
+        if X_eval_t.size(1) < target_channels:
+            pad = torch.zeros(X_eval_t.size(0), target_channels - X_eval_t.size(1), X_eval_t.size(2), device=device)
+            X_eval_t = torch.cat([X_eval_t, pad], dim=1)
         else:
-            X_val_t = X_val_t[:, :target_channels, :]
-    eval_res = best_clf.evaluate(X_val_t, y_val_t, subject_indices=idx_val_t)
+            X_eval_t = X_eval_t[:, :target_channels, :]
+    eval_res = best_clf.evaluate(X_eval_t, y_eval_t, subject_indices=idx_eval_t)
     return float(eval_res.get("accuracy"))
 
 
@@ -304,8 +412,14 @@ def train_simple_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val)
     )
 
 
-def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, subjects, runs, sfreq):
-    """Train deep HybridModelClassifier and save the model."""
+def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, subjects, runs, sfreq,
+                     X_test=None, y_test=None, idx_test=None):
+    """Train deep HybridModelClassifier and save the model.
+
+    When X_test is provided, checkpoint selection uses X_val (an inner validation
+    split) while X_test is only tracked per-epoch and evaluated once at the end;
+    the logged metric is then the test-set accuracy of the selected checkpoint.
+    """
     # Move to tensors
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     X_train_t = torch.tensor(X_train, dtype=torch.float32, device=device)
@@ -314,6 +428,13 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
     X_val_t = torch.tensor(X_val, dtype=torch.float32, device=device)
     y_val_t = torch.tensor(y_val, dtype=torch.long, device=device)
     idx_val_t = torch.tensor(idx_val, dtype=torch.long, device=device)
+    X_test_t = y_test_t = idx_test_t = None
+    if X_test is not None:
+        X_test_t = torch.tensor(X_test, dtype=torch.float32, device=device)
+        y_test_t = torch.tensor(y_test, dtype=torch.long, device=device)
+        idx_test_t = torch.tensor(
+            idx_test if idx_test is not None else np.zeros(len(y_test), dtype=int),
+            dtype=torch.long, device=device)
 
     def _match_channels(x: torch.Tensor, target_channels: int) -> torch.Tensor:
         """Pad or truncate channel dimension to match target_channels."""
@@ -364,6 +485,8 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
         target_channels = getattr(clf.model, "n_channels", X_train_t.shape[1])
         X_train_t = _match_channels(X_train_t, target_channels)
         X_val_t = _match_channels(X_val_t, target_channels)
+        if X_test_t is not None:
+            X_test_t = _match_channels(X_test_t, target_channels)
         # Rebuild feature modules based on saved config, but fit on self data
         fm_configs = metadata.get("feature_modules")
         feature_modules = _build_feature_modules(fm_configs)
@@ -387,6 +510,8 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
         target_channels = X_train_t.shape[1]
         X_train_t = _match_channels(X_train_t, target_channels)
         X_val_t = _match_channels(X_val_t, target_channels)
+        if X_test_t is not None:
+            X_test_t = _match_channels(X_test_t, target_channels)
         feature_modules = _build_feature_modules()
         n_classes = len(np.unique(y_train))
         clf = HybridModelClassifier(
@@ -412,7 +537,9 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
         val_subject_indices=idx_val_t,
         early_stopping_patience=50,
         use_lr_scheduler='onecycle',
-        fine_tuning=bool(args.base_model_path)
+        fine_tuning=bool(args.base_model_path),
+        X_test=X_test_t, y_test=y_test_t,
+        test_subject_indices=idx_test_t,
     )
 
     # Save model and compute margin stats
@@ -465,11 +592,18 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
                     print(f"  {key}: contains NaN at positions {nan_indices}")
                 print(f"  {key}: {vals}")
 
-    # Evaluate saved model
-    print("Evaluating saved model on validation set")
-    best_clf, _ = HybridModelClassifier.load_model(str(model_path))
-    eval_res = best_clf.evaluate(X_val_t, y_val_t, subject_indices=idx_val_t)
-    print(f"Final validation accuracy (saved model): {eval_res['accuracy']:.4f}")
+    # Evaluate saved model on the reporting set: held-out test if provided
+    # (inner-val protocol), otherwise the fit-time validation set (legacy).
+    if X_test_t is not None:
+        print("Evaluating saved model on held-out test set")
+        best_clf, _ = HybridModelClassifier.load_model(str(model_path))
+        eval_res = best_clf.evaluate(X_test_t, y_test_t, subject_indices=idx_test_t)
+        print(f"Held-out test accuracy (saved model): {eval_res['accuracy']:.4f}")
+    else:
+        print("Evaluating saved model on validation set")
+        best_clf, _ = HybridModelClassifier.load_model(str(model_path))
+        eval_res = best_clf.evaluate(X_val_t, y_val_t, subject_indices=idx_val_t)
+        print(f"Final validation accuracy (saved model): {eval_res['accuracy']:.4f}")
 
     # Log consolidated metrics
     notes = _kv_notes(
@@ -479,6 +613,10 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
             "target_channels": target_channels,
             "seed": getattr(args, "seed", None),
             "val_split": getattr(args, "val_split", None),
+            "filter": getattr(args, "filter_method", None),
+            "align": ("euclid" if getattr(args, "session_align", False) else None),
+            "channel_map": (getattr(args, "channel_map", None)
+                            if getattr(args, "channel_map", "index") != "index" else None),
             "split": getattr(args, "split", None),
             "train_runs": getattr(args, "train_runs", None),
             # Prefer a single held-out run tag if it's exactly one run
@@ -495,11 +633,12 @@ def train_deep_model(args, X_train, y_train, idx_train, X_val, y_val, idx_val, s
             "mode": model_mode,
             "base_model": str(args.base_model_path) if args.base_model_path else "",
             "subjects": len(subjects),
-            "trials": len(y_train) + len(y_val),
+            "trials": len(y_train) + len(y_val) + (len(y_test) if X_test_t is not None else 0),
             "val_accuracy": eval_res.get('accuracy'),
             "notes": notes,
         },
     )
+    return float(eval_res.get('accuracy'))
 
 
 def main():
